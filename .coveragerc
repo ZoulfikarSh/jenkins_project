@@ -1,0 +1,9 @@
+[run]
+source = .
+omit =
+    venv/*
+    tests/*
+    deploy.py
+
+[report]
+show_missing = True
