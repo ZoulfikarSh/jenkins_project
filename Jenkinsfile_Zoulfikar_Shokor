@@ -1,0 +1,126 @@
+// Jenkinsfile for the Python-CI-CD pipeline (Lab 10)
+// Stages: Setup -> Lint -> Test -> Coverage -> Security Scan -> Deploy
+// Works on both Linux/macOS agents (sh) and Windows agents (bat).
+
+// Run a shell command with sh on Unix or bat on Windows.
+def run(String cmd) {
+    if (isUnix()) {
+        sh cmd
+    } else {
+        bat cmd
+    }
+}
+
+// Path to the Python interpreter inside the virtual environment.
+// Calling it directly avoids needing "source venv/bin/activate".
+def venvPy() {
+    return isUnix() ? "${env.VIRTUAL_ENV}/bin/python"
+                    : "${env.VIRTUAL_ENV}\\Scripts\\python.exe"
+}
+
+pipeline {
+    agent any
+
+    environment {
+        VIRTUAL_ENV = 'venv'
+        // Minimum line coverage (%) required for the build to pass
+        COVERAGE_MIN = '80'
+    }
+
+    stages {
+        stage('Setup') {
+            steps {
+                script {
+                    // If Jenkins cannot find Python on Windows, replace
+                    // 'python' with the full path to python.exe
+                    def systemPy = isUnix() ? 'python3' : 'python'
+                    if (!fileExists("${env.WORKSPACE}/${env.VIRTUAL_ENV}")) {
+                        run "${systemPy} -m venv ${env.VIRTUAL_ENV}"
+                    }
+                    run "${venvPy()} -m pip install --upgrade pip"
+                    run "${venvPy()} -m pip install -r requirements.txt"
+                }
+            }
+        }
+
+        stage('Lint') {
+            steps {
+                script {
+                    run "${venvPy()} -m flake8 app.py deploy.py tests"
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                script {
+                    run "${venvPy()} -m pytest -v --junitxml=test-results.xml"
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: 'test-results.xml'
+                }
+            }
+        }
+
+        stage('Coverage') {
+            steps {
+                script {
+                    // Settings (source, omitted folders) are in .coveragerc
+                    run "${venvPy()} -m coverage run -m pytest"
+                    run "${venvPy()} -m coverage report -m --fail-under=${env.COVERAGE_MIN}"
+                    run "${venvPy()} -m coverage xml -o coverage.xml"
+                    run "${venvPy()} -m coverage html -d htmlcov"
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'coverage.xml, htmlcov/**',
+                                     allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Security Scan') {
+            steps {
+                script {
+                    // Full JSON report kept as a build artifact
+                    run "${venvPy()} -m bandit app.py deploy.py -f json -o bandit-report.json --exit-zero"
+                    // Readable report in the console; fails the build on
+                    // any MEDIUM or HIGH severity finding (-ll)
+                    run "${venvPy()} -m bandit app.py deploy.py -ll"
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'bandit-report.json',
+                                     allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    echo 'Deploying application...'
+                    // Copies the app to <home>/jenkins_deploy/python-ci-cd
+                    // (set DEPLOY_DIR to change it) and runs a smoke test
+                    run "${venvPy()} deploy.py"
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline finished: all stages passed.'
+        }
+        failure {
+            echo 'Pipeline failed: check the stage logs above.'
+        }
+        cleanup {
+            cleanWs()
+        }
+    }
+}
